@@ -132,6 +132,7 @@ jobs:
           if ! printf '%s' "$KEY" | grep -Eq '^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$'; then
             echo "::error::NVD_API_KEY has unexpected format (length ${#KEY}, expected a 36-character key like xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)"
           fi
+          mkdir -p reports
           set +e
           "$HOME/dependency-check/bin/dependency-check.sh" \
             --nvdApiKey "$KEY" \
