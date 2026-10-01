@@ -105,8 +105,8 @@ jobs:
           VERSION=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
             https://api.github.com/repos/dependency-check/DependencyCheck/releases/latest | jq -r .tag_name | sed 's/^v//')
           echo "Dependency-Check $VERSION"
-          curl -fsSL -o dc.zip "https://github.com/dependency-check/DependencyCheck/releases/download/v${VERSION}/dependency-check-${VERSION}-release.zip"
-          unzip -q dc.zip -d "$HOME"
+          curl -fsSL -o "$RUNNER_TEMP/dc.zip" "https://github.com/dependency-check/DependencyCheck/releases/download/v${VERSION}/dependency-check-${VERSION}-release.zip"
+          unzip -q "$RUNNER_TEMP/dc.zip" -d "$HOME"
           echo "DC=$HOME/dependency-check/bin/dependency-check.sh" >> "$GITHUB_ENV"
 
       - name: Check NVD API key
