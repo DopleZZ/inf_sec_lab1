@@ -83,7 +83,7 @@ jobs:
   sca:
     name: SCA (OWASP Dependency-Check)
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 75
     env:
       NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
       SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
@@ -99,17 +99,6 @@ jobs:
           distribution: temurin
           java-version: 21
 
-      - name: Get date for NVD cache key
-        id: date
-        run: echo "today=$(date +%F)" >> "$GITHUB_OUTPUT"
-
-      # База NVD большая — кэшируем её между запусками.
-      - uses: actions/cache@v4
-        with:
-          path: ~/dependency-check-data
-          key: dependency-check-data-${{ steps.date.outputs.today }}
-          restore-keys: dependency-check-data-
-
       - name: Install OWASP Dependency-Check
         env:
           GH_TOKEN: ${{ github.token }}
@@ -119,8 +108,9 @@ jobs:
           echo "Dependency-Check $VERSION"
           curl -fsSL -o dc.zip "https://github.com/dependency-check/DependencyCheck/releases/download/v${VERSION}/dependency-check-${VERSION}-release.zip"
           unzip -q dc.zip -d "$HOME"
+          echo "DC=$HOME/dependency-check/bin/dependency-check.sh" >> "$GITHUB_ENV"
 
-      - name: Run Dependency-Check (fail on CVSS >= 7)
+      - name: Check NVD API key
         run: |
           # Начиная с Dependency-Check 13 без ключа NVD API база уязвимостей не загружается.
           KEY=$(printf '%s' "$NVD_API_KEY" | tr -d '[:space:]')
@@ -132,10 +122,42 @@ jobs:
           if ! printf '%s' "$KEY" | grep -Eq '^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$'; then
             echo "::error::NVD_API_KEY has unexpected format (length ${#KEY}, expected a 36-character key like xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)"
           fi
+          echo "NVD_KEY=$KEY" >> "$GITHUB_ENV"
+
+      # База NVD большая — кэшируем её между запусками.
+      - name: Restore NVD database cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/dependency-check-data
+          key: dependency-check-data-${{ github.run_id }}
+          restore-keys: dependency-check-data-
+
+      # Загрузка базы — отдельным шагом с ограничением по времени, таймаутами и повторами,
+      # чтобы зависший запрос к NVD не съедал весь job.
+      - name: Update NVD database
+        timeout-minutes: 40
+        run: |
+          "$DC" --updateonly \
+            --nvdApiKey "$NVD_KEY" \
+            --data "$HOME/dependency-check-data" \
+            --connectiontimeout 30000 \
+            --readtimeout 120000 \
+            --nvdMaxRetryCount 10
+
+      # Сохраняем базу даже при ошибке/таймауте загрузки, чтобы следующий запуск не начинал с нуля.
+      - name: Save NVD database cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ~/dependency-check-data
+          key: dependency-check-data-${{ github.run_id }}
+
+      - name: Run Dependency-Check (fail on CVSS >= 7)
+        timeout-minutes: 15
+        run: |
           mkdir -p reports
           set +e
-          "$HOME/dependency-check/bin/dependency-check.sh" \
-            --nvdApiKey "$KEY" \
+          "$DC" --noupdate \
             --project "secure-rest-api" \
             --scan . \
             --exclude "**/.git/**" \
