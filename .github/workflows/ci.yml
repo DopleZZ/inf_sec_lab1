@@ -165,8 +165,20 @@ jobs:
             --failOnCVSS 7 2>&1 | tee dependency-check.log
           STATUS=${PIPESTATUS[0]}
           # Выносим ошибки сканера в аннотации запуска, чтобы их было видно без открытия лога.
-          if [ "$STATUS" -ne 0 ]; then
-            grep -vE '^[[:space:]]|^usage:' dependency-check.log | grep -v '^$' | head -15 | while IFS= read -r line; do
+          if [ -f reports/dependency-check-report.json ]; then
+            node -e '
+              const r = require("./reports/dependency-check-report.json");
+              const vulns = r.dependencies.flatMap((d) => (d.vulnerabilities || []).map((v) => ({
+                dep: d.fileName, id: v.name, severity: v.severity,
+                score: v.cvssv3?.baseScore ?? v.cvssv4?.baseScore ?? v.cvssv2?.score ?? 0,
+              })));
+              vulns.sort((a, b) => b.score - a.score);
+              // GitHub показывает не больше 10 аннотаций одного уровня на шаг — выводим самые критичные.
+              console.log(`::notice::Dependency-Check: ${vulns.length} vulnerabilities in ${r.dependencies.length} dependencies`);
+              for (const v of vulns.slice(0, 10)) console.log(`::warning::${v.dep}: ${v.id} (${v.severity}, CVSS ${v.score})`);
+            '
+          elif [ "$STATUS" -ne 0 ]; then
+            grep -E 'ERROR|Caused by|Exception|^[A-Z][a-z]' dependency-check.log | grep -v '^\[INFO\]' | tail -15 | while IFS= read -r line; do
               echo "::error::$line"
             done
           fi
