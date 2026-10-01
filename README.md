@@ -81,6 +81,6 @@ curl -i -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
 
 ### Секреты репозитория (Settings → Secrets and variables → Actions)
 
-- `NVD_API_KEY` — **очень рекомендуется**. Без ключа первая загрузка базы NVD занимает десятки минут.
+- `NVD_API_KEY` — **обязателен** для Dependency-Check (начиная с версии 13 без ключа база NVD не загружается).
   Бесплатный ключ: https://nvd.nist.gov/developers/request-an-api-key
 - `SNYK_TOKEN` — необязательно, включает шаг Snyk.
