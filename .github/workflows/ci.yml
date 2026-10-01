@@ -83,7 +83,7 @@ jobs:
   sca:
     name: SCA (OWASP Dependency-Check)
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    timeout-minutes: 180
     env:
       NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
       SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
@@ -135,7 +135,7 @@ jobs:
       # Загрузка базы — отдельным шагом с ограничением по времени, таймаутами и повторами,
       # чтобы зависший запрос к NVD не съедал весь job.
       - name: Update NVD database
-        timeout-minutes: 40
+        timeout-minutes: 150
         run: |
           "$DC" --updateonly \
             --nvdApiKey "$NVD_KEY" \
