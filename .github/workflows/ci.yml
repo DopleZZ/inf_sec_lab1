@@ -1,0 +1,167 @@
+name: CI / Security
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Lint & tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+
+  sast:
+    name: SAST (ESLint security, Semgrep, npm audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: mkdir -p reports
+
+      - name: ESLint + eslint-plugin-security
+        run: |
+          npx eslint . -f json -o reports/eslint.json || true
+          npx eslint .
+
+      - name: Semgrep (p/javascript, p/expressjs, p/jwt, p/secrets)
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src semgrep/semgrep \
+            semgrep scan \
+              --config p/javascript --config p/expressjs --config p/jwt --config p/secrets \
+              --exclude node_modules --exclude test \
+              --metrics=off --error \
+              --sarif-output=reports/semgrep.sarif
+
+      - name: npm audit
+        run: |
+          npm audit --json > reports/npm-audit.json || true
+          npm audit --audit-level=high
+
+      - name: Summary
+        if: always()
+        run: |
+          node -e '
+            const fs = require("fs");
+            const read = (f) => { try { return JSON.parse(fs.readFileSync(f, "utf8")); } catch { return null; } };
+            const eslint = read("reports/eslint.json");
+            const semgrep = read("reports/semgrep.sarif");
+            const audit = read("reports/npm-audit.json");
+            const lines = ["## SAST results", "", "| Tool | Result |", "|---|---|"];
+            if (eslint) lines.push(`| ESLint (security) | ${eslint.reduce((n, f) => n + f.errorCount, 0)} errors, ${eslint.reduce((n, f) => n + f.warningCount, 0)} warnings |`);
+            if (semgrep) lines.push(`| Semgrep | ${semgrep.runs[0].results.length} findings (${semgrep.runs[0].tool.driver.rules.length} rules) |`);
+            if (audit) { const v = audit.metadata.vulnerabilities; lines.push(`| npm audit | critical: ${v.critical}, high: ${v.high}, moderate: ${v.moderate}, low: ${v.low} |`); }
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, lines.join("\n") + "\n");
+          '
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sast-reports
+          path: reports/
+
+  sca:
+    name: SCA (OWASP Dependency-Check)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+      SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Get date for NVD cache key
+        id: date
+        run: echo "today=$(date +%F)" >> "$GITHUB_OUTPUT"
+
+      # База NVD большая — кэшируем её между запусками.
+      - uses: actions/cache@v4
+        with:
+          path: ~/dependency-check-data
+          key: dependency-check-data-${{ steps.date.outputs.today }}
+          restore-keys: dependency-check-data-
+
+      - name: Install OWASP Dependency-Check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
+            https://api.github.com/repos/dependency-check/DependencyCheck/releases/latest | jq -r .tag_name | sed 's/^v//')
+          echo "Dependency-Check $VERSION"
+          curl -fsSL -o dc.zip "https://github.com/dependency-check/DependencyCheck/releases/download/v${VERSION}/dependency-check-${VERSION}-release.zip"
+          unzip -q dc.zip -d "$HOME"
+
+      - name: Run Dependency-Check (fail on CVSS >= 7)
+        run: |
+          ARGS=()
+          if [ -n "$NVD_API_KEY" ]; then ARGS+=(--nvdApiKey "$NVD_API_KEY"); else echo "::warning::NVD_API_KEY secret is not set, NVD update will be slow"; fi
+          "$HOME/dependency-check/bin/dependency-check.sh" \
+            --project "secure-rest-api" \
+            --scan . \
+            --exclude "**/.git/**" \
+            --data "$HOME/dependency-check-data" \
+            --format HTML --format JSON --format SARIF \
+            --out reports \
+            --failOnCVSS 7 \
+            "${ARGS[@]}"
+
+      - name: Summary
+        if: always()
+        run: |
+          [ -f reports/dependency-check-report.json ] || exit 0
+          node -e '
+            const r = require("./reports/dependency-check-report.json");
+            const vulns = r.dependencies.flatMap((d) => (d.vulnerabilities || []).map((v) => ({ dep: d.fileName, ...v })));
+            const count = (s) => vulns.filter((v) => (v.severity || "").toUpperCase() === s).length;
+            const lines = [
+              "## SCA results (OWASP Dependency-Check)", "",
+              `Scanned dependencies: ${r.dependencies.length}`, "",
+              "| Critical | High | Medium | Low |", "|---|---|---|---|",
+              `| ${count("CRITICAL")} | ${count("HIGH")} | ${count("MEDIUM")} | ${count("LOW")} |`,
+            ];
+            if (vulns.length) {
+              lines.push("", "| Dependency | CVE | Severity |", "|---|---|---|");
+              for (const v of vulns) lines.push(`| ${v.dep} | ${v.name} | ${v.severity} |`);
+            }
+            require("fs").appendFileSync(process.env.GITHUB_STEP_SUMMARY, lines.join("\n") + "\n");
+          '
+
+      # Дополнительно: Snyk, если в секретах репозитория задан SNYK_TOKEN.
+      - name: Snyk test
+        if: env.SNYK_TOKEN != ''
+        run: npx --yes snyk test --severity-threshold=high
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sca-reports
+          path: reports/
