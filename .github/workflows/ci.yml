@@ -123,19 +123,29 @@ jobs:
       - name: Run Dependency-Check (fail on CVSS >= 7)
         run: |
           # Начиная с Dependency-Check 13 без ключа NVD API база уязвимостей не загружается.
-          if [ -z "$NVD_API_KEY" ]; then
+          KEY=$(printf '%s' "$NVD_API_KEY" | tr -d '[:space:]')
+          if [ -z "$KEY" ]; then
             echo "::error::Secret NVD_API_KEY is not set. Get a free key at https://nvd.nist.gov/developers/request-an-api-key and add it in Settings → Secrets and variables → Actions."
             exit 1
           fi
+          set +e
           "$HOME/dependency-check/bin/dependency-check.sh" \
-            --nvdApiKey "$NVD_API_KEY" \
+            --nvdApiKey "$KEY" \
             --project "secure-rest-api" \
             --scan . \
             --exclude "**/.git/**" \
             --data "$HOME/dependency-check-data" \
             --format HTML --format JSON --format SARIF \
             --out reports \
-            --failOnCVSS 7
+            --failOnCVSS 7 2>&1 | tee dependency-check.log
+          STATUS=${PIPESTATUS[0]}
+          # Выносим ошибки сканера в аннотации запуска, чтобы их было видно без открытия лога.
+          if [ "$STATUS" -ne 0 ]; then
+            grep -E 'ERROR|Caused by|Exception|CVSS' dependency-check.log | sort -u | head -10 | while IFS= read -r line; do
+              echo "::error::$line"
+            done
+          fi
+          exit "$STATUS"
 
       - name: Summary
         if: always()
